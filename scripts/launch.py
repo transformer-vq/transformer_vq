@@ -289,7 +289,7 @@ def train(dataset, p_train_op):
                 **metrics,
                 **{f"val_{k}": v for k, v in val_metrics.items()},
                 step=step,
-                secs_per_step=(end_time - start_time) / n_update,
+                secs_per_step=(end_time - start_time) / args.n_print_step,
             )
             print(train_state.step)
             print(batch["inputs"].shape)
