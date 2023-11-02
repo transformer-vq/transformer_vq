@@ -75,6 +75,7 @@ parser.add_argument("--p_nucleus", type=float, help="Nucleus cutoff during sampl
 parser.add_argument("--n_warmup_step", type=int, help="Linear warmup steps")
 parser.add_argument("--n_max_step", type=int, help="Maximum step number")
 parser.add_argument("--n_extra_step", type=int, help="Extra steps, use > 0 in finetune")
+parser.add_argument("--n_print_step", type=int, help="Steps per print", default=100)
 parser.add_argument("--n_save_step", type=int, help="Train steps between eval phases")
 parser.add_argument("--n_eval_step", type=int, help="Batches per eval phase")
 parser.add_argument("--n_save_keep", type=int, help="Checkpoints to keep", default=5)
@@ -268,7 +269,6 @@ def train(dataset, p_train_op):
                         step=step,
                         keep=args.n_save_keep,
                     )
-        print_mem_info()
         batch = next(train_iter)
         rng, batch_rng = jax.random.split(rng)
         train_state, metrics = p_train_op(
@@ -277,25 +277,27 @@ def train(dataset, p_train_op):
             batch=common_utils.shard(batch),
             rng=common_utils.shard_prng_key(batch_rng),
         )
-        metrics = jax_utils.unreplicate(metrics)
-        metrics = jax.block_until_ready(metrics)
-        train_loss_lm_per_token = metrics["loss_lm_per_token_unscaled"]
-        train_loss_lm_per_token /= metrics["loss_mask_per_token"]
-        end_time = time.perf_counter()
-        logging_info = dict(
-            loss_lm_per_token=train_loss_lm_per_token,
-            **metrics,
-            **{f"val_{k}": v for k, v in val_metrics.items()},
-            step=step,
-            secs_per_step=(end_time - start_time) / n_update,
-        )
-        print(train_state.step)
-        print(batch["inputs"].shape)
-        print(batch["targets"].shape)
-        print(logging_info)
-        if jax.process_index() == 0:
-            wandb.log(logging_info)
-        start_time = end_time
+        if step % args.n_print_step == 0:
+            print_mem_info()
+            metrics = jax_utils.unreplicate(metrics)
+            metrics = jax.block_until_ready(metrics)
+            train_loss_lm_per_token = metrics["loss_lm_per_token_unscaled"]
+            train_loss_lm_per_token /= metrics["loss_mask_per_token"]
+            end_time = time.perf_counter()
+            logging_info = dict(
+                loss_lm_per_token=train_loss_lm_per_token,
+                **metrics,
+                **{f"val_{k}": v for k, v in val_metrics.items()},
+                step=step,
+                secs_per_step=(end_time - start_time) / n_update,
+            )
+            print(train_state.step)
+            print(batch["inputs"].shape)
+            print(batch["targets"].shape)
+            print(logging_info)
+            if jax.process_index() == 0:
+                wandb.log(logging_info)
+            start_time = end_time
     return train_state
 
 
