@@ -75,7 +75,7 @@ parser.add_argument("--p_nucleus", type=float, help="Nucleus cutoff during sampl
 parser.add_argument("--n_warmup_step", type=int, help="Linear warmup steps")
 parser.add_argument("--n_max_step", type=int, help="Maximum step number")
 parser.add_argument("--n_extra_step", type=int, help="Extra steps, use > 0 in finetune")
-parser.add_argument("--n_print_step", type=int, help="Steps per print", default=100)
+parser.add_argument("--n_print_step", type=int, help="Steps per print", default=200)
 parser.add_argument("--n_save_step", type=int, help="Train steps between eval phases")
 parser.add_argument("--n_eval_step", type=int, help="Batches per eval phase")
 parser.add_argument("--n_save_keep", type=int, help="Checkpoints to keep", default=5)
@@ -227,6 +227,7 @@ def train(dataset, p_train_op):
     assert args.sequence_len % args.block_len == 0
     assert args.n_save_step >= (args.sequence_len // args.update_len)
     assert args.n_save_step % (args.sequence_len // args.update_len) == 0
+    assert args.n_print_step % (args.sequence_len // args.update_len) == 0
 
     # always init and replicate inside the function doing reassigning of train_state,
     # otherwise there will be a dangling ref to a second (and non-updated) train_state,
