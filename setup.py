@@ -6,7 +6,7 @@ from setuptools import setup
 
 setup(
     name="transformer_vq",
-    version="13.0.0",
+    version="13.0.1",
     url="https://github.com/transformer-vq/transformer_vq/",
     license="MIT",
     author="Anonymous Authors; Paper and Code Under Double-Blind Review at ICLR 2024",
@@ -23,7 +23,7 @@ setup(
         "flax==0.6.11",
         "numpy>=1.22.0",
         "optax==0.1.5",
-        "orbax-checkpoint>=0.1.7",
+        "orbax-checkpoint==0.1.7",
         "requests>=2.28.1",
         "sentencepiece==0.1.96",
         "seqio==0.0.16",
