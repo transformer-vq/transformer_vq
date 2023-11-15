@@ -1,109 +1,177 @@
-import argparse
+import functools
+import os.path as osp  # etils.epath currently gives errors with local paths
 import sys
 import time
+from typing import Any
+from typing import Dict
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
+import orbax.checkpoint as ocp
+import tensorflow as tf
 import wandb
+from absl import app
+from absl import flags
+from absl import logging
+from etils import epath
 from flax import jax_utils
 from flax.training import common_utils
-from flax.training.train_state import TrainState
+from flax.training import orbax_utils
+from flax.training import train_state as train_utils
+from ml_collections import config_flags
 
 from transformer_vq.nn.model import Transformer
 from transformer_vq.nn.types import TransformerConfig
-from transformer_vq.nn.vq import VQSpec
-from transformer_vq.ops.evaluate import eval_op
-from transformer_vq.ops.sample import sample_op
-from transformer_vq.ops.train import train_op
 from transformer_vq.utils.datasets import Dataset
-from transformer_vq.utils.io import load_checkpoint
-from transformer_vq.utils.io import save_checkpoint
-from transformer_vq.utils.io import save_pixels
-from transformer_vq.utils.io import save_text
 from transformer_vq.utils.tree import flattened_traversal
 
+MODES = ["train_vocab", "train", "validation", "test", "flop_count"]
 
-DTYPES = ["bfloat16", "float32"]
-COMMANDS = ["train_vocab", "train", "validation", "test", "sample", "bench"]
-DATASETS = ["enwik8", "pg19", "imagenet64"]
-OPTIMIZERS = ["adamw", "lion", "adafactor"]
-
-parser = argparse.ArgumentParser("Launch script for Transformer VQ experiments.")
-parser.add_argument("--multihost", type=int, help="Multihost mode?", default=0)
-parser.add_argument("--command", choices=COMMANDS)
-parser.add_argument("--dataset", choices=DATASETS)
-parser.add_argument("--data_dir", type=str, help="Download path", default=None)
-parser.add_argument("--vocab_path", type=str, help="Sentencepiece path", default=None)
-parser.add_argument("--prng_seed", type=int, help="PRNG seed")
-parser.add_argument("--global_batch_size", type=int, help="Global batch size")
-parser.add_argument("--sequence_len", type=int, help="Sequence length T")
-parser.add_argument("--update_len", type=int, help="Update length LK")
-parser.add_argument("--block_len", type=int, help="Block length L")
-parser.add_argument("--mem_len", type=int, help="Band length M")
-parser.add_argument("--grad_thru_cache", type=int, help="Backprop thru cache (0/1)")
-parser.add_argument("--agg_cache", type=int, help="Include aggregated cache (0/1)")
-
-parser.add_argument("--param_dtype", choices=DTYPES, help="Dtype for parameters")
-parser.add_argument("--dtype", choices=DTYPES, help="Dtype for computation")
-parser.add_argument("--d_model", type=int, help="Model width")
-parser.add_argument("--d_k", type=int, help="Key width")
-parser.add_argument("--d_v", type=int, help="Value width")
-parser.add_argument("--d_ff", type=int, help="Fan-out width, if using MLPs", default=0)
-parser.add_argument("--n_head", type=int, help="Num attention heads")
-parser.add_argument("--n_code", type=int, help="Num codes per head")
-parser.add_argument("--n_layer", type=int, help="Num transformer layers (two GAU each)")
-parser.add_argument("--pe_abs", type=int, help="Include abs pos embs (0/1)")
-parser.add_argument("--pe_lam", type=int, help="Max angular wavelength", default=100000)
-parser.add_argument("--p_dropemb", type=float, help="Embedding dropout rate")
-parser.add_argument("--p_dropsin", type=float, help="Rel PE sinusoid dropout rate")
-parser.add_argument("--p_dropres", type=float, help="Residual dropout rate")
-parser.add_argument("--p_droplyr", type=float, help="LayerDrop rate")
-parser.add_argument("--c_beta", type=float, help="Codebook commit coefficient")
-parser.add_argument("--c_gamma", type=float, help="Codebook EMA rate")
-parser.add_argument("--e_tie", type=int, help="Output embs tied w input embs (0/1)")
-parser.add_argument("--e_preln", type=int, help="Output embs applied after LN (0/1)")
-parser.add_argument("--e_scale", type=float, help="Output embs scale factor")
-
-parser.add_argument("--grad_clip", type=float, help="Gradient clip norm", default=None)
-parser.add_argument("--optimizer", choices=OPTIMIZERS, help="Optimizer name")
-parser.add_argument("--lr_max", type=float, help="Peak learning rate")
-parser.add_argument("--lr_schedule", type=str, help="Learning rate schedule name")
-parser.add_argument("--wd_lam", type=float, help="Decoupled weight decay")
-parser.add_argument("--p_nucleus", type=float, help="Nucleus cutoff during sampling")
-parser.add_argument("--n_warmup_step", type=int, help="Linear warmup steps")
-parser.add_argument("--n_max_step", type=int, help="Maximum step number")
-parser.add_argument("--n_extra_step", type=int, help="Extra steps, use > 0 in finetune")
-parser.add_argument("--n_print_step", type=int, help="Steps per print", default=200)
-parser.add_argument("--n_save_step", type=int, help="Train steps between eval phases")
-parser.add_argument("--n_eval_step", type=int, help="Batches per eval phase")
-parser.add_argument("--n_save_keep", type=int, help="Checkpoints to keep", default=5)
-parser.add_argument("--in_checkpoint_dir", type=str, help="Checkpoint dir to load from")
-parser.add_argument("--out_checkpoint_dir", type=str, help="Checkpoint dir to save to")
-parser.add_argument("--model_name", type=str, help="Model name")
-parser.add_argument("--run_id", type=str, help="For logging continuity", default=None)
-args = parser.parse_args()
+FLAGS = flags.FLAGS
+config_flags.DEFINE_config_file("config", None, "Configuration file", lock_config=False)
+flags.DEFINE_boolean("multihost", None, "Multihost?")
+flags.DEFINE_string("workdir", None, "Directory for experiment data.")
+flags.DEFINE_enum("mode", None, MODES, "Mode.")
+flags.DEFINE_boolean("wb_enabled", False, "Log to W&B?")
+flags.DEFINE_string("wb_run", None, "W&B run id, for resuming with continuity.")
+flags.DEFINE_string("model_name", None, "Optional model name. Generated if not given.")
+flags.mark_flags_as_required(["config", "multihost", "workdir", "mode"])
 
 
-if args.multihost:
-    jax.distributed.initialize()
+def get_model_name() -> str:
+    if FLAGS.model_name is not None:
+        return FLAGS.model_name
+    a = FLAGS.config.attn_type
+    h = FLAGS.config.head_type
+    return f"transformer_vq_{FLAGS.config.dataset}_{a}_{h}"
 
 
-def print_mem_info():
-    backend = jax.lib.xla_bridge.get_backend()
-    n_bufs = len(backend.live_buffers())
+def get_vocab_path() -> str:
+    fname = f"{FLAGS.config.dataset}_sentencepiece.model"
+    return osp.join(FLAGS.workdir, "vocabs", fname)
 
-    def tobytes(b):
-        return np.prod(b.shape) * int(str(b.dtype)[-2:]) // 8
 
-    n_bytes = sum([tobytes(b) for b in backend.live_buffers()])
-    print(f"num_live_buffers: {n_bufs}")
-    print(f"num_live_bytes: {n_bytes}")
-    for i, buf in enumerate(backend.live_buffers()):
-        # correct number of printed items depends on optimizer and whether embs are tied
-        if args.n_vocab in list(buf.shape):
-            print(f"buffer_{i}.shape: {buf.shape}")
+def get_data_dir() -> str:
+    return osp.join(FLAGS.workdir, "datasets")
+
+
+def get_checkpoint_manager() -> ocp.CheckpointManager:
+    return ocp.CheckpointManager(
+        directory=epath.Path(FLAGS.workdir) / "checkpoints" / get_model_name(),
+        checkpointers=ocp.Checkpointer(ocp.PyTreeCheckpointHandler()),
+        options=ocp.CheckpointManagerOptions(
+            create=True,
+            max_to_keep=5,
+            save_interval_steps=1,
+            step_prefix="state",
+        ),
+    )
+
+
+def do_restore(
+    mgr: ocp.CheckpointManager,
+    target: train_utils.TrainState,
+) -> train_utils.TrainState:
+    return mgr.restore(
+        step=mgr.latest_step(),
+        items=target,
+        restore_kwargs=dict(
+            restore_args=orbax_utils.restore_args_from_target(target, mesh=None),
+        ),
+    )
+
+
+def do_save(
+    mgr: ocp.CheckpointManager,
+    target: train_utils.TrainState,
+    step: int,
+) -> None:
+    mgr.save(
+        step=step,
+        items=target,
+        save_kwargs=dict(
+            save_args=orbax_utils.save_args_from_target(target),
+        ),
+    )
+
+
+def get_root_rngs():
+    rng_root = jax.random.PRNGKey(FLAGS.config.prng_seed)
+    rng_sync, rng_unsync = jax.random.split(rng_root)
+    rng_unsync = jax.random.fold_in(rng_unsync, jax.process_index())
+    return rng_sync, rng_unsync
+
+
+def get_transformer_config_dict(is_train) -> Dict[str, Any]:
+    return {
+        **vars(FLAGS.config)["_fields"],
+        "is_train": is_train,
+        "n_device": jax.device_count(),
+    }
+
+
+def get_transformer_config(is_train) -> TransformerConfig:
+    return TransformerConfig.create(**get_transformer_config_dict(is_train))
+
+
+def get_optimizer() -> optax.GradientTransformation:
+    if FLAGS.config.optimizer == "adamw":
+        return optax.adamw(
+            learning_rate=FLAGS.config.lr_max,
+            b1=0.9,
+            b2=0.98,
+            eps=10**-9,
+            mu_dtype=jnp.float32,  # full precision as suggested by Rae et al., 2021
+            weight_decay=0.0,  # optimizers in optax scale wd by lr, so diy
+        )
+    if FLAGS.config.optimizer == "lion":
+        return optax.lion(
+            learning_rate=FLAGS.config.lr_max,
+            b1=0.95,
+            b2=0.98,
+            mu_dtype=jnp.bfloat16,  # bfloat16 as suggested by Chen et al., 2023
+            weight_decay=0.0,  # optimizers in optax scale wd by lr, so diy
+        )
+    if FLAGS.config.optimizer == "adafactor":
+        return optax.adafactor(
+            learning_rate=FLAGS.config.lr_max,
+            multiply_by_parameter_scale=True,
+            clipping_threshold=1.0,  # must be >= 1.0 per optax docs.
+            weight_decay_rate=0.0,  # optimizers in optax scale wd by lr, so diy
+        )
+
+
+def get_schedule_fn() -> optax.Schedule:
+    max_steps = FLAGS.config.n_max_step
+    warmup_steps = FLAGS.config.n_warmup_step
+    decay_steps = max_steps - warmup_steps  # exclude n_extra
+    warmup = optax.linear_schedule(0.0, 1.0, transition_steps=warmup_steps)
+    if FLAGS.config.lr_schedule == "cosine":
+        main_schedule = optax.cosine_decay_schedule(
+            init_value=1.0,
+            decay_steps=decay_steps,
+            alpha=0.1,  # final schedule value
+        )
+    elif FLAGS.config.lr_schedule == "inv_sqrt":
+        main_schedule = optax.polynomial_schedule(
+            init_value=1.0,
+            end_value=0.1,
+            power=-0.5,
+            transition_steps=decay_steps,
+        )
+    elif FLAGS.config.lr_schedule == "linear":
+        main_schedule = optax.linear_schedule(
+            init_value=1.0,
+            end_value=0.1,
+            transition_steps=decay_steps,
+        )
+    else:
+        raise NotImplementedError("schedule name not supported")
+    return optax.join_schedules(
+        schedules=[warmup, main_schedule], boundaries=[FLAGS.config.n_warmup_step]
+    )
 
 
 def get_param_label_fn():
@@ -112,72 +180,16 @@ def get_param_label_fn():
     )
 
 
-def get_schedule_fn():
-    warmup = optax.linear_schedule(0.0, 1.0, transition_steps=args.n_warmup_step)
-    dec_steps = args.n_max_step - args.n_warmup_step  # exclude extra, const finetune lr
-    if args.lr_schedule == "cosine":
-        main_schedule = optax.cosine_decay_schedule(
-            init_value=1.0,
-            decay_steps=dec_steps,
-            alpha=0.1,  # final schedule value
-        )
-    elif args.lr_schedule == "inv_sqrt":
-        main_schedule = optax.polynomial_schedule(
-            init_value=1.0,
-            end_value=0.1,
-            power=-0.5,
-            transition_steps=dec_steps,
-        )
-    elif args.lr_schedule == "linear":
-        main_schedule = optax.linear_schedule(
-            init_value=1.0,
-            end_value=0.1,
-            transition_steps=dec_steps,
-        )
-    else:
-        raise NotImplementedError("schedule name not supported")
-    return optax.join_schedules(
-        schedules=[warmup, main_schedule], boundaries=[args.n_warmup_step]
-    )
-
-
-def get_optimizer():
-    if args.optimizer == "adamw":
-        return optax.adamw(
-            learning_rate=args.lr_max,
-            b1=0.9,
-            b2=0.98,
-            eps=10**-9,
-            mu_dtype=jnp.float32,  # full precision as suggested by Rae et al., 2021
-            weight_decay=0.0,  # optimizers in optax scale wd by lr, so diy
-        )
-    if args.optimizer == "lion":
-        return optax.lion(
-            learning_rate=args.lr_max,
-            b1=0.95,
-            b2=0.98,
-            mu_dtype=jnp.bfloat16,  # bfloat16 as suggested by Chen et al., 2023
-            weight_decay=0.0,  # optimizers in optax scale wd by lr, so diy
-        )
-    if args.optimizer == "adafactor":
-        return optax.adafactor(
-            learning_rate=args.lr_max,
-            multiply_by_parameter_scale=True,
-            clipping_threshold=1.0,  # must be >= 1.0 per optax docs.
-            weight_decay_rate=0.0,  # optimizers in optax scale wd by lr, so diy
-        )
-
-
-def get_tx():
+def get_tx() -> optax.GradientTransformation:
     maybe_gradclip = []
-    if args.grad_clip is not None:
-        maybe_gradclip.append(optax.clip_by_global_norm(args.grad_clip))
+    if FLAGS.config.grad_clip is not None:
+        maybe_gradclip.append(optax.clip_by_global_norm(FLAGS.config.grad_clip))
     optimizer = get_optimizer()
     schedule = optax.scale_by_schedule(get_schedule_fn())
     maybe_decay = []
-    if args.wd_lam > 0.0:
+    if FLAGS.config.wd_lam > 0.0:
         wd = optax.add_decayed_weights(
-            weight_decay=-args.wd_lam,
+            weight_decay=-FLAGS.config.wd_lam,
             mask=lambda p: jax.tree_util.tree_map(lambda x: jnp.ndim(x) != 1, p),
         )
         maybe_decay.append(wd)
@@ -191,144 +203,194 @@ def get_tx():
     return tx
 
 
-def get_train_state(init_rng):
-    config = dict(**vars(args), is_train=True)
-    _ = config.pop("block_len")
-    config["block_len"] = 8
+def get_train_state(rng_init):
+    # make fast init config
+    canary = FLAGS.config.sequence_len
+    assert canary != 8
+    config = get_transformer_config_dict(is_train=True)
+    config.update({"sequence_len": 24, "block_len": 8, "mem_len": 8})  # need > 2 blocks
     config = TransformerConfig.create(**config)
-    model = Transformer(config)
-    sk1, sk2, sk3, sk4 = jax.random.split(init_rng, 4)
-    rngs = dict(params=sk1, ephemeral=sk2, timeless=sk3)
-    inputs = jnp.zeros([1, config.block_len], dtype=jnp.int32)
-    doc_ids = jnp.zeros([1, config.block_len], dtype=jnp.int32)
-    state = Transformer.initial_state(config=config, batch_size=1)
-    vq_spec = VQSpec.create(
-        n_device=jnp.array([1]),
-        n_block_per_update=jnp.array([1]),
-        loss_mask=jnp.ones([1, config.block_len], jnp.int32),
-    )
-    params = model.init(
-        rngs,
-        inputs=inputs,
-        doc_ids=doc_ids,
-        state=state,
-        vq_spec=vq_spec,
-    )["params"].unfreeze()
+    assert FLAGS.config.sequence_len == canary
+    # do init
+    rng_param, rng_ephemeral, rng_timeless = jax.random.split(rng_init, 3)
+    params = Transformer(config).init(
+        dict(params=rng_param, ephemeral=rng_ephemeral, timeless=rng_timeless),
+        inputs=jnp.zeros([1, config.sequence_len], dtype=jnp.int32),
+    )["params"]
     tx = get_tx()
-    if args.command != "bench":
-        param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
-        print(f"param count: {param_count}")
-    return TrainState.create(apply_fn=None, params=params, tx=tx)
+    # log the param count
+    param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
+    logging.info(f"param count: {param_count}")
+    # return train state
+    return train_utils.TrainState.create(apply_fn=None, params=params.unfreeze(), tx=tx)
 
 
-def train(dataset, p_train_op):
-    assert args.sequence_len % args.update_len == 0
-    assert args.update_len % args.block_len == 0
-    assert args.sequence_len % args.block_len == 0
-    assert args.n_save_step >= (args.sequence_len // args.update_len)
-    assert args.n_save_step % (args.sequence_len // args.update_len) == 0
-    assert args.n_print_step % (args.sequence_len // args.update_len) == 0
+def get_dataset():
+    dataset_cls = Dataset.registry.get(FLAGS.config.dataset)
+    dataset = dataset_cls(vocab_path=get_vocab_path(), data_dir=get_data_dir())
+    if FLAGS.mode == "train_vocab":
+        sys.exit(0)
+    setattr(FLAGS.config, "n_vocab", dataset.vocab_size)
+    return dataset
 
+
+def loss_fn(params, config, batch, rng):
+    rngs = dict()
+    if rng is not None:
+        rng_ephemeral, rng_timeless = jax.random.split(rng, 2)
+        rngs = dict(ephemeral=rng_ephemeral, timeless=rng_timeless)
+    outputs = Transformer(config).apply({"params": params}, batch["inputs"], rngs=rngs)
+    l_ce_terms_unmasked = optax.softmax_cross_entropy_with_integer_labels(
+        logits=outputs["logits"], labels=batch["targets"]
+    )
+    l_ce_term_avg = jnp.mean(batch["loss_mask"] * l_ce_terms_unmasked)
+    l_ce_mask_avg = jnp.mean(batch["loss_mask"])
+    l_commit_avg = outputs["l_commit"]
+    l_codebook_avg = outputs["l_codebook"]
+    l_total_avg = l_ce_term_avg + config.c_beta * l_commit_avg + l_codebook_avg
+    metrics = dict(
+        l_ce_term_avg=l_ce_term_avg,
+        l_ce_mask_avg=l_ce_mask_avg,
+        l_commit_avg=l_commit_avg,
+        l_codebook_avg=l_codebook_avg,
+    )
+    return l_total_avg, metrics
+
+
+@functools.partial(jax.pmap, donate_argnums=(0,), axis_name="devices")
+def train_step(train_state, batch, rng):
+    (_, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+        train_state.params,
+        config=get_transformer_config(is_train=True),
+        batch=batch,
+        rng=rng,
+    )
+    metrics, grads = jax.lax.pmean([metrics, grads], axis_name="devices")
+    train_state = train_state.apply_gradients(grads=grads)
+    # Estimate ce loss for global batch: sum of unmasked ce terms / sum of mask values.
+    # Equivalent to:
+    metrics["l_ce_avg"] = metrics["l_ce_term_avg"] / metrics["l_ce_mask_avg"]
+    return train_state, metrics
+
+
+def train_loop():
+    if FLAGS.wb_enabled and jax.process_index() == 0:
+        logging.info("Creating W&B connection...")
+        wandb.init(
+            project=get_model_name(),
+            config=vars(FLAGS.config)["_fields"],
+            resume="never" if FLAGS.wb_run is None else "must",
+            id=FLAGS.wb_run,
+        )
+
+    logging.info("Creating checkpoint manager...")
+    checkpoint_mgr = get_checkpoint_manager()
+    start_step = checkpoint_mgr.latest_step() or 0
+
+    logging.info("Creating dataset...")
+    dataset = get_dataset()
+    train_iter = dataset.get_iter(
+        split_name="train",
+        batch_size=FLAGS.config.global_batch_size // jax.process_count(),
+        sequence_len=FLAGS.config.sequence_len,
+        shuffle_seed_root=start_step,  # with preemptions, picks a new shuffle
+    )
+
+    logging.info("Creating train state...")
     # always init and replicate inside the function doing reassigning of train_state,
     # otherwise there will be a dangling ref to a second (and non-updated) train_state,
     # which wastes a lot of memory when trying to train large models!
-    train_state, rng, start_step = state_setup()
+    rng_sync, rng_unsync = get_root_rngs()
+    train_state = get_train_state(rng_sync)
+    if checkpoint_mgr.latest_step():
+        train_state = do_restore(checkpoint_mgr, train_state)
     train_state = jax.block_until_ready(jax_utils.replicate(train_state))
-    local_batch_size = args.global_batch_size // jax.process_count()
-    n_update = args.sequence_len // args.update_len
 
-    train_config = TransformerConfig.create(**vars(args), is_train=True)
-    train_iter = dataset.get_iter(
-        split_name="train",
-        batch_size=local_batch_size,
-        sequence_len=args.sequence_len,
-    )
-
+    logging.info("Starting training loop...")
     val_metrics = dict()
-    best_val_loss_lm = float("inf")
+    best_val_loss = float("inf")
     start_time = time.perf_counter()
-    for step in range(start_step, args.n_max_step + args.n_extra_step + 1, n_update):
-        if step % args.n_save_step == 0:
-            val_metrics = evaluate(
-                train_state=train_state,
-                dataset=dataset,
-                split_name="validation",
-                p_eval_op=eval_op,
-                n_eval_step=args.n_eval_step,  # per host
-                persist=False,
-            )
-            last_val_loss_lm = val_metrics["loss_lm_per_token"].tolist()
-            if best_val_loss_lm > last_val_loss_lm:
-                best_val_loss_lm = last_val_loss_lm
-                print("val loss improved")
-                if step > start_step:
-                    print("saving checkpoint")
-                    save_checkpoint(
-                        target=jax_utils.unreplicate(train_state),
-                        save_dir=args.out_checkpoint_dir,
-                        prefix="checkpoint",
-                        step=step,
-                        keep=args.n_save_keep,
-                    )
-        batch = next(train_iter)
-        rng, batch_rng = jax.random.split(rng)
-        train_state, metrics = p_train_op(
-            train_config,
+    for step in range(start_step, FLAGS.config.n_max_step + 1):
+        train_state, metrics = train_step(
             train_state=train_state,
-            batch=common_utils.shard(batch),
-            rng=common_utils.shard_prng_key(batch_rng),
+            batch=common_utils.shard(next(train_iter)),
+            rng=common_utils.shard_prng_key(jax.random.fold_in(rng_unsync, step)),
         )
-        if step % args.n_print_step == 0:
-            print_mem_info()
+        if step % FLAGS.config.n_print_step == 0:
             metrics = jax_utils.unreplicate(metrics)
             metrics = jax.block_until_ready(metrics)
-            train_loss_lm_per_token = metrics["loss_lm_per_token_unscaled"]
-            train_loss_lm_per_token /= metrics["loss_mask_per_token"]
             end_time = time.perf_counter()
-            logging_info = dict(
-                loss_lm_per_token=train_loss_lm_per_token,
+            metrics = dict(
                 **metrics,
                 **{f"val_{k}": v for k, v in val_metrics.items()},
                 step=step,
-                secs_per_step=(end_time - start_time) / args.n_print_step,
+                secs_per_step=(end_time - start_time) / FLAGS.config.n_print_step,
             )
-            print(train_state.step)
-            print(batch["inputs"].shape)
-            print(batch["targets"].shape)
-            print(logging_info)
-            if jax.process_index() == 0:
-                wandb.log(logging_info)
+            logging.info("-" * 80)
+            for k, v in metrics.items():
+                logging.info(f"\t{k}: {v.item() if isinstance(v, jax.Array) else v}")
+            if FLAGS.wb_enabled and jax.process_index() == 0:
+                wandb.log(metrics)
             start_time = end_time
+        if step % FLAGS.config.n_save_step == 0:
+            val_metrics = eval_loop(
+                train_state=train_state,
+                checkpoint_mgr=None,
+                split_name="validation",
+                n_eval_step=FLAGS.config.n_eval_step,
+            )
+            last_val_loss = val_metrics["l_ce_avg"].item()
+            if best_val_loss > last_val_loss:
+                logging.info("val loss improved")
+                if best_val_loss < float("inf"):
+                    logging.info("saving checkpoint")
+                    do_save(
+                        mgr=checkpoint_mgr,
+                        target=jax_utils.unreplicate(train_state),
+                        step=step,
+                    )
+                best_val_loss = last_val_loss
     return train_state
 
 
-def evaluate(
-    train_state,
-    dataset,
-    split_name,
-    p_eval_op,
-    n_eval_step=None,
-    persist=False,
-):
-    assert args.sequence_len % args.block_len == 0
-    if train_state is None:
-        train_state, rng, start_step = state_setup()
-        train_state = jax.block_until_ready(jax_utils.replicate(train_state))
-    step = int(jax_utils.unreplicate(train_state.step))
-    local_batch_size = args.global_batch_size // jax.process_count()
+@functools.partial(jax.pmap, axis_name="devices")
+def eval_step(params, batch):
+    config = get_transformer_config(is_train=False)
+    _, metrics = loss_fn(params, config, batch, rng=None)
+    return jax.lax.pmean(metrics, axis_name="devices")
 
-    eval_config = TransformerConfig.create(**vars(args), is_train=False)
+
+def eval_loop(
+    split_name: str,
+    train_state: Optional[train_utils.TrainState] = None,
+    checkpoint_mgr: Optional[ocp.CheckpointManager] = None,
+    n_eval_step: Optional[int] = None,
+):
+    logging.info("Creating dataset...")
+    local_batch_size = FLAGS.config.global_batch_size // jax.process_count()
+    dataset = get_dataset()
     eval_iter = dataset.get_iter(
         split_name=split_name,
         batch_size=local_batch_size,
-        sequence_len=args.sequence_len,
+        sequence_len=FLAGS.config.sequence_len,
+        shuffle_seed_root=None,
     )
 
+    if train_state is None:
+        logging.info("Creating checkpoint manager...")
+        checkpoint_mgr = checkpoint_mgr or get_checkpoint_manager()
+        logging.info("Creating train state...")
+        rng_sync, rng_unsync = get_root_rngs()
+        train_state = get_train_state(rng_sync)
+        if checkpoint_mgr.latest_step():
+            train_state = do_restore(checkpoint_mgr, train_state)
+        train_state = jax.block_until_ready(jax_utils.replicate(train_state))
+
+    start_time = time.perf_counter()
     accumulator = None
     for i, batch in enumerate(eval_iter):
-        print(f"eval step {i}...")
-        stats = p_eval_op(
-            eval_config,
+        logging.info(f"eval step {i}...")
+        stats = eval_step(
             params=train_state.params,
             batch=common_utils.shard(batch),
         )
@@ -342,141 +404,105 @@ def evaluate(
             if i + 1 == n_eval_step:
                 break
 
-    loss_lm_per_token = accumulator["loss_lm_per_token_unscaled"]
-    loss_lm_per_token /= accumulator["loss_mask_per_token"]
-    # calculation below assumes eval_op averages over global batch, blocks, tokens
-    # and that the eval data is replicated over hosts and sharded over devices per host.
-    mult = local_batch_size * args.sequence_len
-    total_tokens = mult * accumulator["loss_mask_per_token"]
-    eval_metrics = dict(loss_lm_per_token=loss_lm_per_token, total_tokens=total_tokens)
+    l_ce_avg = accumulator["l_ce_term_avg"]
+    l_ce_avg /= accumulator["l_ce_mask_avg"]
+    # calculation below assumes eval_op averages over global batch tokens
+    # and the eval data is *replicated* over hosts
+    # and the eval data is *sharded* over devices per host.
+    #
+    # if eval_data is sharded over hosts,
+    #     you should multiply total_tokens by a further factor of jax.process_count()
+    mult = local_batch_size * FLAGS.config.sequence_len
+    total_tokens = mult * accumulator["l_ce_mask_avg"]
+    eval_metrics = dict(l_ce_avg=l_ce_avg, total_tokens=total_tokens)
     eval_metrics = jax.block_until_ready(jax_utils.unreplicate(eval_metrics))
-    if persist:
-        save_kwargs = dict(
-            prefix=f"{split_name}_loss_lm_per_token",
-            save_dir=args.out_checkpoint_dir,
-            step=step,
-            keep=args.n_save_keep,
-        )
-        save_checkpoint(eval_metrics, **save_kwargs)
+    end_time = time.perf_counter()
+    eval_metrics.update(dict(secs_per_step=(end_time - start_time) / i))
     return eval_metrics
 
 
-def sample(dataset, p_sample_op, persist=False):
-    train_state, rng, start_step = state_setup()
-    step = int(train_state.step)
-    train_state = jax.block_until_ready(jax_utils.replicate(train_state))
-    local_batch_size = args.global_batch_size // jax.process_count()
+def flop_count():
+    global_batch_size = FLAGS.config.global_batch_size
+    sequence_len = FLAGS.config.sequence_len
+    local_batch_size = global_batch_size // jax.process_count()
+    setattr(FLAGS.config, "n_vocab", 256)
 
-    args_dict = vars(args)
-    _ = args_dict.pop("block_len")
-    sample_config = TransformerConfig.create(**args_dict, block_len=1, is_train=False)
-    rng = common_utils.shard_prng_key(rng).block_until_ready()
+    rng_sync, rng_unsync = get_root_rngs()
+    train_state = get_train_state(rng_sync)
+    train_state = jax_utils.replicate(train_state)
+    train_state = jax.block_until_ready(train_state)
 
-    start_time = time.perf_counter()
-    samples = p_sample_op(
-        sample_config,
-        dataset.vocab.eos_id,
-        params=train_state.params,
-        rng=rng,
-    ).block_until_ready()  # block until ready so the time delta is correct
-    end_time = time.perf_counter()
-
-    total_time = end_time - start_time
-    if persist:
-        samples = jnp.reshape(samples, [local_batch_size, args.sequence_len])
-        save_fn = dict(text=save_text, image=save_pixels)[dataset.modality]
-        suffix = dict(text=".txt", image=".png")[dataset.modality]
-        for i in range(local_batch_size):
-            save_fn(
-                target=dataset.decode(samples[i]),
-                dirname=args.out_checkpoint_dir,
-                fname=f"samples_step{step}_proc{jax.process_index()}_item{i}{suffix}",
-            )
-    return dict(total_time=total_time)
-
-
-def print_args_and_devices():
-    if args.command != "bench":
-        print(jax.devices())
-        print(jax.local_devices())
-    if args.command != "bench":
-        for k, v in vars(args).items():
-            print(f"{k}: {v}")
-
-
-def wandb_setup():
-    if args.run_id == "":
-        setattr(args, "run_id", None)
-    if args.command == "train" and jax.process_index() == 0:
-        wandb.init(
-            project=args.model_name,
-            config=vars(args),
-            resume="never" if args.run_id is None else "must",
-            id=args.run_id,
-        )
-
-
-def dataset_setup():
-    dataset_cls = Dataset.registry.get(args.dataset)
-    dataset = dataset_cls(vocab_path=args.vocab_path, data_dir=args.data_dir)
-    if args.command == "train_vocab":
-        sys.exit(0)
-    setattr(args, "n_vocab", dataset.vocab_size)
-    return dataset
-
-
-def state_setup():
-    synced_rng = jax.random.PRNGKey(args.prng_seed)
-    synced_rng, init_rng = jax.random.split(synced_rng)
-    train_state = get_train_state(init_rng)
-    train_state = load_checkpoint(
-        train_state=train_state,
-        load_dir=args.in_checkpoint_dir,
-        prefix="checkpoint",
+    targets = jax.random.randint(
+        key=jax.random.fold_in(rng_unsync, hash("targets")),
+        minval=0,
+        maxval=256,
+        shape=[local_batch_size, sequence_len],
+        dtype=jnp.int32,
     )
-    start_step = train_state.step
-    if args.command != "bench":
-        print(f"start_step: {start_step}")
-    synced_rng = jax.random.fold_in(synced_rng, start_step)
-    unsynced_rng = jax.random.fold_in(synced_rng, jax.process_index())
-    return train_state, unsynced_rng, start_step
+    batch = dict(
+        inputs=jnp.pad(targets[:, :-1], ((0, 0), (1, 0))),
+        targets=targets,
+        loss_mask=jnp.full([local_batch_size, sequence_len], fill_value=True),
+    )
+    batch = common_utils.shard(batch)
+    batch = jax.block_until_ready(batch)
 
+    rng_batch = common_utils.shard_prng_key(rng_unsync)
+    rng_batch = jax.block_until_ready(rng_batch)
 
-def main():
-    print_args_and_devices()
-    wandb_setup()
-    dataset = dataset_setup()
-
-    if args.command == "train":
-        train(dataset=dataset, p_train_op=train_op)
-
-    elif args.command in {"validation", "test"}:
-        eval_metrics = evaluate(
-            train_state=None,
-            dataset=dataset,
-            split_name=args.command,
-            p_eval_op=eval_op,
-            persist=True,
-        )
-        print(eval_metrics)
-
-    elif args.command in {"sample", "bench"}:
-        sample_kwargs = dict(
-            dataset=dataset,
-            p_sample_op=sample_op,
-        )
-        if args.command == "sample":
-            outputs = sample(**sample_kwargs, persist=True)
-            print(outputs)
-        else:
-            # warm start for benchmarking to exclude JIT compile time of p_sample_op
-            outputs = sample(**sample_kwargs, persist=False)  # cold started
-            outputs = sample(**sample_kwargs, persist=False)  # warm started
-            print(outputs["total_time"])
-
+    compiled = train_step.lower(train_state, batch, rng_batch).compile()
+    cost_analysis = compiled.cost_analysis()
+    if cost_analysis is None:
+        logging.info("Cost analysis is not available from compiler on platform.")
     else:
-        raise ValueError(f"Operation {args.command} not implemented in main.")
+        n_flop = cost_analysis[0]["flops"]
+        logging.info(f"Flop count per device (is wrong, see readme): {n_flop}")
+        logging.info(f"Num hosts: {jax.process_count()}")
+        logging.info(f"Num devices per host: {jax.local_device_count()}")
+
+
+def log_devices_and_config():
+    logging.info("== Devices ==")
+    logging.info(jax.devices())
+
+    logging.info("== Local Devices ==")
+    logging.info(jax.local_devices())
+
+    logging.info("== Launch config ==")
+    logging.info(f"multihost: {FLAGS.multihost}")
+    logging.info(f"workdir: {FLAGS.workdir}")
+    logging.info(f"mode: {FLAGS.mode}")
+    logging.info(f"wb_enabled: {FLAGS.wb_enabled}")
+    logging.info(f"wb_run: {FLAGS.wb_run}")
+
+    logging.info("== Model config ==")
+    for k, v in vars(FLAGS.config)["_fields"].items():
+        logging.info(f"{k}: {v}")
+
+
+def main(argv):
+    del argv  # unused
+    tf.get_logger().setLevel(logging.INFO)
+    logging.set_verbosity(logging.INFO)
+    if FLAGS.multihost:
+        jax.distributed.initialize()
+    if jax.default_backend() in {"cuda", "rocm"}:
+        # Hide any GPUs from TensorFlow. Otherwise TF might reserve memory and make
+        # it unavailable to JAX. (Not necessary with TPU.)
+        tf.config.experimental.set_visible_devices([], "GPU")
+
+    log_devices_and_config()
+    if FLAGS.mode in {"train_vocab", "train"}:
+        train_loop()
+    elif FLAGS.mode in {"validation", "test"}:
+        eval_metrics = eval_loop(split_name=FLAGS.mode)
+        logging.info(eval_metrics)
+    elif FLAGS.mode == "flop_count":
+        flop_count()
+    else:
+        raise ValueError(f"Operation {FLAGS.mode} not implemented in main.")
 
 
 if __name__ == "__main__":
-    main()
+    jax.config.config_with_absl()
+    app.run(main)

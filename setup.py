@@ -6,7 +6,7 @@ from setuptools import setup
 
 setup(
     name="transformer_vq",
-    version="13.0.1",
+    version="15.0.0",
     url="https://github.com/transformer-vq/transformer_vq/",
     license="MIT",
     author="Anonymous Authors; Paper and Code Under Double-Blind Review at ICLR 2024",
@@ -17,6 +17,9 @@ setup(
     platforms="any",
     python_requires=">=3.8",
     install_requires=[
+        "absl-py==2.0.0",
+        "etils==1.3.0",
+        "ml_collections",
         "chex>=0.1.7",
         "datasets>=2.11.0",
         "jaxlib==0.4.9",
@@ -29,7 +32,7 @@ setup(
         "seqio==0.0.16",
         "tensorflow==2.12.1",
         "tensorflow-text==2.12.1",
-        "tensorflow-datasets>=4.9.1",
+        "tensorflow-datasets==4.9.1",
         "tensorboard>=2.10.1",
         "tensorstore>=0.1.35",
         "tqdm>=4.65.0",

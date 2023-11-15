@@ -144,7 +144,7 @@ class Dataset(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def get_iter(self, split_name, batch_size, sequence_len):
+    def get_iter(self, split_name, batch_size, sequence_len, shuffle_seed_root):
         raise NotImplementedError
 
 
@@ -162,7 +162,7 @@ class Enwik8(Dataset):
             spm_uds=[],
         )
 
-    def get_iter(self, split_name, batch_size, sequence_len):
+    def get_iter(self, split_name, batch_size, sequence_len, shuffle_seed_root):
         # split manually, since huggingface dataset gives all 100m enwik8 bytes as train
         ds = self._get_tokenized("train", shard_by_host=False)  # never shard; small
         token_ints = list(ds.take(1).as_numpy_iterator())[0]
@@ -177,6 +177,7 @@ class Enwik8(Dataset):
             is_train=split_name == "train",
             vocab=self.vocab,
             append_eos=False,
+            shuffle_seed_root=shuffle_seed_root,
         )
 
 
@@ -194,7 +195,7 @@ class PG19(Dataset):
             spm_uds=[],
         )
 
-    def get_iter(self, split_name, batch_size, sequence_len):
+    def get_iter(self, split_name, batch_size, sequence_len, shuffle_seed_root):
         return get_batches(
             ds=self._get_tokenized(split_name, shard_by_host=split_name == "train"),
             batch_size=batch_size,
@@ -202,6 +203,7 @@ class PG19(Dataset):
             is_train=split_name == "train",
             vocab=self.vocab,
             append_eos=True,
+            shuffle_seed_root=shuffle_seed_root,
         )
 
 
@@ -220,7 +222,7 @@ class Imagenet64(Dataset):
             img_shape=(64, 64, 3),
         )
 
-    def get_iter(self, split_name, batch_size, sequence_len):
+    def get_iter(self, split_name, batch_size, sequence_len, shuffle_seed_root):
         if split_name == "train":
             # use first 1.2m examples of official training set for training
             ds = self._get_tokenized("train", shard_by_host=True)
@@ -232,6 +234,7 @@ class Imagenet64(Dataset):
                 is_train=True,
                 vocab=self.vocab,
                 append_eos=False,
+                shuffle_seed_root=shuffle_seed_root,
             )
         if split_name == "validation":
             # use remaining examples in training split for validation
@@ -244,6 +247,7 @@ class Imagenet64(Dataset):
                 is_train=False,
                 vocab=self.vocab,
                 append_eos=False,
+                shuffle_seed_root=shuffle_seed_root,
             )
         if split_name == "test":
             # use official validation set to benchmark; imagenet has no public test set
@@ -255,5 +259,6 @@ class Imagenet64(Dataset):
                 is_train=False,
                 vocab=self.vocab,
                 append_eos=False,
+                shuffle_seed_root=shuffle_seed_root,
             )
         raise NotImplementedError
