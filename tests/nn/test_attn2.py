@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 # noreorder
-from tests.common import WIDENINGS, HEAD_TYPES, TOLERANCES
+from tests.common import WIDENINGS, HEAD_TYPES, REDUCTION_TYPES, TOLERANCES
 from tests.common import gen_len_tuples
 from tests.common import gen_type_tuples
 from tests.common import attn_fixture
@@ -14,7 +14,7 @@ from tests.common import rng_fixture
 
 
 @pytest.mark.parametrize("widening", WIDENINGS)
-@pytest.mark.parametrize("attn_type,head_type", gen_type_tuples())
+@pytest.mark.parametrize("attn_type,head_type,reduction_type", gen_type_tuples())
 def test_attn_jacobian_fullseq(
     rng_fixture,
     attn_fixture,
@@ -22,6 +22,7 @@ def test_attn_jacobian_fullseq(
     widening,
     attn_type,
     head_type,
+    reduction_type,
     is_train=True,
     sequence_len=12,
     dtype=jnp.float32,
@@ -33,6 +34,7 @@ def test_attn_jacobian_fullseq(
         dtypes=dtype,
         attn_type=attn_type,
         head_type=head_type,
+        reduction_type=reduction_type,
         is_train=is_train,
     )
     attn_cls, params = attn_fixture(config)
@@ -64,12 +66,14 @@ def test_attn_jacobian_fullseq(
 
 @pytest.mark.parametrize("widening", WIDENINGS)
 @pytest.mark.parametrize("head_type", HEAD_TYPES)
+@pytest.mark.parametrize("reduction_type", REDUCTION_TYPES)
 def test_vq_attn_impl_consistency(
     rng_fixture,
     attn_fixture,
     transformer_config_fixture,
     widening,
     head_type,
+    reduction_type,
     sequence_len=120,
     dtype=jnp.float32,
 ):
@@ -80,6 +84,7 @@ def test_vq_attn_impl_consistency(
         widening=widening,
         dtypes=dtype,
         head_type=head_type,
+        reduction_type=reduction_type,
         is_train=True,
     )
     config_new = transformer_config_fixture(**config_common, attn_type="vq")

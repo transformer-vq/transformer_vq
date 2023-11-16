@@ -15,6 +15,7 @@ def get_config():
     config.dtype = jnp.bfloat16  # activation dtype
     config.attn_type = "vq"  # one of vq, full, vq_old, full_old
     config.head_type = "shga"  # one of shga, mqa, mha
+    config.reduction_type = "matmul"  # for vq attn; one of cumsum, matmul, assoc_scan
     config.d_model = 768  # model width
     config.d_k = 128  # key width
     config.n_code = 512  # number of codes per codebook

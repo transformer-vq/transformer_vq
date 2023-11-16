@@ -23,6 +23,7 @@ class TransformerConfig:
     block_len: int
     attn_type: str
     head_type: str
+    reduction_type: str
     d_model: int
     d_k: int
     n_code: int

@@ -135,7 +135,8 @@ Multi-host mode for GPUs is not currently supported by our scripts, as it requir
 ## Training speed tests
 
 Commands to speed test are as follows. 
-For convenience, set some environment variables ```WORKDIR``` and ```SEQ_LEN``` before running, e.g.:
+For convenience, set some environment variables ```WORKDIR``` and ```SEQ_LEN``` before running. 
+For example:
 ```
 export WORKDIR=workdir;
 export SEQ_LEN=2048;
@@ -219,7 +220,7 @@ python3 scripts/launch.py \
 
 ## FLOP/s estimation
 
-[FLOP/s](https://en.wikipedia.org/wiki/FLOPS) can be estimated in on scripts using Jax's [AOT compilation](https://jax.readthedocs.io/en/latest/aot.html) functionality to produce the FLOP count first. 
+[FLOP/s](https://en.wikipedia.org/wiki/FLOPS) can be estimated in our scripts using Jax's [AOT compilation](https://jax.readthedocs.io/en/latest/aot.html) functionality to produce the FLOP count first. 
 However, the estimate is not currently available on TPU, and on CPU Jax's calculation appears to be *incorrect*: the flop count is even less than product of the parameter count and the local batch size in tokens. 
 
 As a result, we discourage users from estimating the flop count using ```--config.mode=flop_count``` until this issue is resolved.

@@ -71,32 +71,57 @@ class VQAttention(nn.Module):
         chex.assert_shape(x, dims["BRCD"])
         return jnp.reshape(x, dims["BTD"])
 
-    def compute_cache_vars(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
-        # this function computes our per-block cache variables parallel using matmul,
-        # which is similar to hua et al., 2022.
+    def get_cache_vars_cumsum(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
+        # this function computes our per-block cache variables using a cross-block
+        # cumulative sum, is similar to an option from hua et al., 2022.
         delta = jax.nn.one_hot(z, num_classes=self.n_code, dtype=self.dtype, axis=-1)
         chex.assert_shape(delta, dims["BhRCS"])
         delta1_by_block = jnp.einsum("bhrcs->bhrs", delta)
-        delta1_cumul_by_block = jnp.cumsum(delta1_by_block, axis=2)
-        delta1_fracs_by_block = jnp.einsum(
-            "bhrs,bhgs->bhsrg",
-            jnp.reciprocal(jnp.clip(delta1_cumul_by_block, a_min=1.0)),
-            delta1_by_block,
-        )  # safe divide here has no impact on result, since zero denom implies zero row
-        delta1_fracs_by_block = jnp.tril(delta1_fracs_by_block)
+        delta1_by_block_cumulative = jnp.cumsum(delta1_by_block, axis=2)
         cache_var_lower = jnp.pad(
-            delta1_cumul_by_block[:, :, :-2], ((0, 0), (0, 0), (2, 0), (0, 0))
+            delta1_by_block_cumulative[:, :, :-2], ((0, 0), (0, 0), (2, 0), (0, 0))
         )
 
         deltav_by_block = jnp.einsum("bhrcs,bhrcv->bhrsv", delta, v)
-        deltav_by_block_normalized = deltav_by_block / jnp.clip(
-            delta1_by_block[..., None], a_min=1.0
-        )  # safe divide here has no impact on result, since zero denom implies zero row
-        deltav_by_block_cumul_normalized = jnp.einsum(
+        deltav_by_block_cumulative = jnp.cumsum(deltav_by_block, axis=2)
+        cache_var_upper = jnp.pad(
+            deltav_by_block_cumulative[:, :, :-2],
+            ((0, 0), (0, 0), (2, 0), (0, 0), (0, 0)),
+        )
+
+        cache_var_upper_div_lower = jnp.divide(
+            cache_var_upper,
+            jnp.clip(cache_var_lower[..., None], a_min=1.0),
+        )  # safe divide here has no impact on result, since zero denom means zero numer
+        return cache_var_upper_div_lower, cache_var_lower
+
+    def get_cache_vars_matmul(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
+        # this function computes our per-block cache variables in parallel using matmul,
+        # which is similar to an option from hua et al., 2022.
+        delta = jax.nn.one_hot(z, num_classes=self.n_code, dtype=self.dtype, axis=-1)
+        chex.assert_shape(delta, dims["BhRCS"])
+        delta1_by_block = jnp.einsum("bhrcs->bhrs", delta)
+        delta1_by_block_cumulative = jnp.cumsum(delta1_by_block, axis=2)
+        delta1_fracs_by_block = jnp.einsum(
+            "bhrs,bhgs->bhsrg",
+            jnp.reciprocal(jnp.clip(delta1_by_block_cumulative, a_min=1.0)),
+            delta1_by_block,
+        )  # safe divide here has no impact on result, since zero denom means zero numer
+        delta1_fracs_by_block = jnp.tril(delta1_fracs_by_block)
+        cache_var_lower = jnp.pad(
+            delta1_by_block_cumulative[:, :, :-2], ((0, 0), (0, 0), (2, 0), (0, 0))
+        )
+
+        deltav_by_block = jnp.einsum("bhrcs,bhrcv->bhrsv", delta, v)
+        deltav_by_block_normalized = jnp.divide(
+            deltav_by_block,
+            jnp.clip(delta1_by_block[..., None], a_min=1.0),
+        )  # safe divide here has no impact on result, since zero denom means zero numer
+        deltav_by_block_normalized_cumulative = jnp.einsum(
             "bhsrg,bhgsv->bhrsv", delta1_fracs_by_block, deltav_by_block_normalized
         )
         cache_var_upper_div_lower = jnp.pad(
-            deltav_by_block_cumul_normalized[:, :, :-2],
+            deltav_by_block_normalized_cumulative[:, :, :-2],
             ((0, 0), (0, 0), (2, 0), (0, 0), (0, 0)),
         )
         chex.assert_shape(cache_var_lower, dims["BhRS"])
@@ -104,7 +129,65 @@ class VQAttention(nn.Module):
         chex.assert_trees_all_equal_dtypes(
             delta, cache_var_lower, cache_var_upper_div_lower, v
         )
-        return cache_var_lower, cache_var_upper_div_lower
+        return cache_var_upper_div_lower, cache_var_lower
+
+    def get_cache_vars_assoc(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
+        # this function computes our per-block cache variables using a cross-block
+        # associative scan, which could be more performant on very long sequences.
+        delta = jax.nn.one_hot(z, num_classes=self.n_code, dtype=self.dtype, axis=-1)
+        chex.assert_shape(delta, dims["BhRCS"])
+        delta1_by_block = jnp.einsum("bhrcs->bhrs", delta)
+        deltav_by_block = jnp.einsum("bhrcs,bhrcv->bhrsv", delta, v)
+        deltav_by_block_normalized = jnp.divide(
+            deltav_by_block,
+            jnp.clip(delta1_by_block[..., None], a_min=1.0),
+        )  # safe divide here has no impact on result, since zero denom means zero numer
+
+        def merge(a, b):
+            a_upper_div_lower = a[0]
+            b_upper_div_lower = b[0]
+            a_lower = a[1]
+            b_lower = b[1]
+            term1 = jnp.multiply(
+                jnp.divide(a_lower, jnp.clip(a_lower + b_lower, a_min=1.0))[..., None],
+                a_upper_div_lower,
+            )  # safe divide here has no impact on result, since...
+            term2 = jnp.multiply(
+                jnp.divide(b_lower, jnp.clip(a_lower + b_lower, a_min=1.0))[..., None],
+                b_upper_div_lower,
+            )  # safe divide here has no impact on result, since...
+            upper_div_lower = term1 + term2
+            lower = a_lower + b_lower
+            return upper_div_lower, lower
+
+        assoc_scan_output = jax.lax.associative_scan(
+            fn=merge,
+            elems=(deltav_by_block_normalized, delta1_by_block),
+            reverse=False,
+            axis=2,
+        )
+        deltav_by_block_normalized_cumulative = assoc_scan_output[0]
+        delta1_by_block_cumulative = assoc_scan_output[1]
+        chex.assert_shape(deltav_by_block_normalized_cumulative, dims["BhRSV"])
+        chex.assert_shape(delta1_by_block_cumulative, dims["BhRS"])
+
+        cache_var_lower = jnp.pad(
+            delta1_by_block_cumulative[:, :, :-2], ((0, 0), (0, 0), (2, 0), (0, 0))
+        )
+        cache_var_upper_div_lower = jnp.pad(
+            deltav_by_block_normalized_cumulative[:, :, :-2],
+            ((0, 0), (0, 0), (2, 0), (0, 0), (0, 0)),
+        )
+        return cache_var_upper_div_lower, cache_var_lower
+
+    def compute_cache_vars(self, z, v, dims):
+        if self.reduction_type == "cumsum":
+            return self.get_cache_vars_cumsum(z, v, dims)
+        if self.reduction_type == "matmul":
+            return self.get_cache_vars_matmul(z, v, dims)
+        if self.reduction_type == "assoc_scan":
+            return self.get_cache_vars_assoc(z, v, dims)
+        raise NotImplementedError(f"Unknown reduction_type: {self.reduction_type}")
 
     def __call__(self, x):
         dims = chex.Dimensions(
@@ -208,7 +291,7 @@ class VQAttention(nn.Module):
         chex.assert_shape(scores_present, dims["BHRCC"])
         chex.assert_trees_all_equal_dtypes(scores_present, scores_prev, scores_cache)
 
-        cache_var_lower, cache_var_upper_div_lower = self.compute_cache_vars(z, v, dims)
+        cache_var_upper_div_lower, cache_var_lower = self.compute_cache_vars(z, v, dims)
         count_biases = jnp.where(
             jnp.equal(cache_var_lower, jnp.zeros_like(cache_var_lower)),
             -INFTY_APPROX,

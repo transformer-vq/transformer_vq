@@ -21,9 +21,10 @@ from transformer_vq.nn.model import Transformer
 jax.config.update("jax_enable_x64", True)
 
 
-ATTN_TYPES = ["vq", "full", "vq_old", "full_old"]
+ATTN_TYPES = ["vq", "full", "vq_old", "full_old"]  # the _old ones use a vanilla scan
 ATTN_TYPES_OLD_UNWRAPPED = ["vq_old_unwrapped", "full_old_unwrapped"]
 HEAD_TYPES = ["mha", "mqa", "shga"]
+REDUCTION_TYPES = ["cumsum", "matmul", "assoc_scan"]
 WIDENINGS = [7]
 DTYPES = [jnp.float32]
 TOLERANCES = dict(atol=1e-5, rtol=1e-4)
@@ -41,10 +42,17 @@ def get_list(given, default):
     raise NotImplementedError("Unexpected value for given settings.")
 
 
-def gen_type_tuples(attn_type="all", head_type="all"):
+def gen_type_tuples(attn_type="all", head_type="all", reduction_type="all"):
     attn_types = get_list(given=attn_type, default=ATTN_TYPES)
     head_types = get_list(given=head_type, default=HEAD_TYPES)
-    return itertools.product(attn_types, head_types)
+    reduction_types = get_list(given=reduction_type, default=REDUCTION_TYPES)
+    prod = itertools.product(attn_types, head_types, reduction_types)
+    out = []
+    for a, h, r in prod:
+        if a != "vq":
+            r = None
+        out.append((a, h, r))
+    return out
 
 
 def gen_len_tuples(t=12):
@@ -79,6 +87,7 @@ def transformer_config_fixture():
         global_batch_size=None,  # set to none if not used
         attn_type="vq",
         head_type="shga",
+        reduction_type="matmul",
     ):
         return TransformerConfig.create(
             n_device=N_LOCAL_DEVICE,
@@ -89,6 +98,7 @@ def transformer_config_fixture():
             block_len=block_len,
             attn_type=attn_type,
             head_type=head_type,
+            reduction_type=reduction_type,
             d_model=4 * widening,
             d_k=2 * widening,
             n_code=8,

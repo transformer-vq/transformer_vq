@@ -77,7 +77,8 @@ def test_get_agg_biases(rng_fixture):
 
 @pytest.mark.parametrize("widening", WIDENINGS)
 @pytest.mark.parametrize(
-    "attn_type,head_type", gen_type_tuples(attn_type=ATTN_TYPES_OLD_UNWRAPPED)
+    "attn_type,head_type,reduction_type",
+    gen_type_tuples(attn_type=ATTN_TYPES_OLD_UNWRAPPED),
 )
 def test_attn_jacobian_blockonly(
     rng_fixture,
@@ -86,6 +87,7 @@ def test_attn_jacobian_blockonly(
     widening,
     attn_type,
     head_type,
+    reduction_type,
     is_train=True,
     sequence_len=12,
     dtype=jnp.float32,
@@ -97,6 +99,7 @@ def test_attn_jacobian_blockonly(
         dtypes=dtype,
         attn_type=attn_type,
         head_type=head_type,
+        reduction_type=reduction_type,
         is_train=is_train,
     )
     cls, params = attn_fixture(config)
