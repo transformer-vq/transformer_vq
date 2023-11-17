@@ -71,7 +71,7 @@ class VQAttention(nn.Module):
         chex.assert_shape(x, dims["BRCD"])
         return jnp.reshape(x, dims["BTD"])
 
-    def get_cache_vars_cumsum(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
+    def get_cache_vars_sum(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
         # this function computes our per-block cache variables using a cross-block
         # cumulative sum, is similar to an option from hua et al., 2022.
         delta = jax.nn.one_hot(z, num_classes=self.n_code, dtype=self.dtype, axis=-1)
@@ -93,6 +93,60 @@ class VQAttention(nn.Module):
             cache_var_upper,
             jnp.clip(cache_var_lower[..., None], a_min=1.0),
         )  # safe divide here has no impact on result, since zero denom means zero numer
+        return cache_var_upper_div_lower, cache_var_lower
+
+    def get_cache_vars_serial(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
+        # this function computes our per-block cache variables using a cross-block
+        # cumulative sum, is similar to an option from hua et al., 2022.
+        delta = jax.nn.one_hot(z, num_classes=self.n_code, dtype=self.dtype, axis=-1)
+        n_block = delta.shape[2]
+        chex.assert_shape(delta, dims["BhRCS"])
+        delta1_by_block = jnp.einsum("bhrcs->bhrs", delta)
+        deltav_by_block = jnp.einsum("bhrcs,bhrcv->bhrsv", delta, v)
+        deltav_by_block_normalized = jnp.divide(
+            deltav_by_block,
+            jnp.clip(delta1_by_block[..., None], a_min=1.0),
+        )
+
+        def scan_loop_body(carry, in_dict):
+            old_lower = carry["lower"]
+            new_lower = old_lower + in_dict["delta1_by_block"]
+            f1 = jnp.divide(old_lower, jnp.clip(new_lower, a_min=1.0))
+            f2 = jnp.divide(in_dict["delta1_by_block"], jnp.clip(new_lower, a_min=1.0))
+            new_upper_div_lower = jnp.add(
+                f1[..., None] * carry["upper_div_lower"],
+                f2[..., None] * in_dict["deltav_by_block_normalized"],
+            )
+            carry_new = dict(
+                upper_div_lower=new_upper_div_lower,
+                lower=new_lower,
+            )
+            return carry_new, carry_new
+
+        _, cache_vars = jax.lax.scan(
+            f=scan_loop_body,
+            init=dict(
+                upper_div_lower=jnp.zeros(dtype=self.dtype, shape=dims["BhSV"]),
+                lower=jnp.zeros(dtype=self.dtype, shape=dims["BhS"]),
+            ),
+            xs=dict(
+                deltav_by_block_normalized=jnp.transpose(
+                    deltav_by_block_normalized, (2, 0, 1, 3, 4)
+                ),
+                delta1_by_block=jnp.transpose(delta1_by_block, (2, 0, 1, 3)),
+            ),
+            length=n_block,
+            unroll=1,
+        )
+
+        cache_var_upper_div_lower = jnp.pad(
+            jnp.transpose(cache_vars["upper_div_lower"][:-2], (1, 2, 0, 3, 4)),
+            ((0, 0), (0, 0), (2, 0), (0, 0), (0, 0)),
+        )
+        cache_var_lower = jnp.pad(
+            jnp.transpose(cache_vars["lower"][:-2], (1, 2, 0, 3)),
+            ((0, 0), (0, 0), (2, 0), (0, 0)),
+        )
         return cache_var_upper_div_lower, cache_var_lower
 
     def get_cache_vars_matmul(self, z: jax.Array, v: jax.Array, dims: chex.Dimensions):
@@ -181,8 +235,10 @@ class VQAttention(nn.Module):
         return cache_var_upper_div_lower, cache_var_lower
 
     def compute_cache_vars(self, z, v, dims):
-        if self.reduction_type == "cumsum":
-            return self.get_cache_vars_cumsum(z, v, dims)
+        if self.reduction_type == "sum":  # unstable probably, don't use this!
+            return self.get_cache_vars_sum(z, v, dims)
+        if self.reduction_type == "serial":
+            return self.get_cache_vars_serial(z, v, dims)
         if self.reduction_type == "matmul":
             return self.get_cache_vars_matmul(z, v, dims)
         if self.reduction_type == "assoc_scan":

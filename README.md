@@ -7,7 +7,7 @@ It does not yet support sampling, custom update lengths, or decoupling the k/v c
 
 Support for model parallelism using pjit will be added in the next few weeks!
 
-## Single-Host Launch
+## Single-Host Launch (CPU, GPU, and TPU)
 
 The scripts use [W&B](https://wandb.ai/) for cloud-based logging. It is free for personal and academic use.
 
@@ -51,7 +51,19 @@ python3 ./scripts/launch.py \
     --config.global_batch_size=8 \
 ```
 
-## Multi-Host Launch - TPU Pod Slice
+## Multi-Host Launch on GPU Clusters
+
+For GPU clusters using Slurm or OpenMPI, our scripts work without additional configuration. 
+For other GPU clusters, you need to provide values for the coordinator IP and port, the number of processes, and a process ID for each process starting from 0.  
+For example:
+```
+--gpu_coord_addr="192.168.0.1:1234" \
+--gpu_n_process=2 \
+--gpu_process_id=0 \
+```
+This information is passed to ```jax.distributed.initialize```. For more information, please refer to the [Jax docs](https://jax.readthedocs.io/en/latest/_autosummary/jax.distributed.initialize.html#jax.distributed.initialize).
+
+## Multi-Host Launch on TPU Pod Slices
 
 To launch on a TPU pod or pod slice, all commands can be run remotely as follows: 
 ```
@@ -128,19 +140,18 @@ You can delete the pod/slice instance as follows:
 gcloud compute tpus tpu-vm delete TPU_POD_SLICE_NAME --zone ZONE
 ```
 
-## Multi-Host Launch - GPU Clusters
-
-Multi-host mode for GPUs is not currently supported by our scripts, as it requires rendezvous information to be provided to Jax. Support will be added soon.
-
 ## Training speed tests
 
 Commands to speed test are as follows. 
-For convenience, set some environment variables ```WORKDIR``` and ```SEQ_LEN``` before running. 
+For convenience, set some environment variables ```WORKDIR```, ```SEQ_LEN```, and ```REDUCTION_TYPE``` before running.
 For example:
 ```
 export WORKDIR=workdir;
 export SEQ_LEN=2048;
+export REDUCTION_TYPE=serial;
 ```
+In our experiments, cross-block reduction type "serial" is the most efficient for both short and long sequences, and it was also the only stable reduction type with linear complexity! 
+
 
 ### VQ Attention, single-head gated (SHGA, aka GAU):
 ```
@@ -151,7 +162,8 @@ python3 scripts/launch.py \
     --mode=train \
     --config.attn_type=vq \
     --config.head_type=shga \
-    --config.sequence_len="$SEQ_LEN";
+    --config.reduction_type="$REDUCTION_TYPE" \
+    --config.sequence_len="$SEQ_LEN" 
 ```
 
 ### VQ Attention, multi-query (MQA):
@@ -164,7 +176,8 @@ python3 scripts/launch.py \
     --mode=train \
     --config.attn_type=vq \
     --config.head_type=mqa \
-    --config.sequence_len="$SEQ_LEN";
+    --config.reduction_type="$REDUCTION_TYPE" \
+    --config.sequence_len="$SEQ_LEN" 
 ```
 
 ### VQ Attention, multi-head (MHA):
@@ -177,7 +190,8 @@ python3 scripts/launch.py \
     --mode=train \
     --config.attn_type=vq \
     --config.head_type=mha \
-    --config.sequence_len="$SEQ_LEN";
+    --config.reduction_type="$REDUCTION_TYPE" \
+    --config.sequence_len="$SEQ_LEN" 
 ```
 
 ### Quadratic-time attention, single-head gated (SHGA, aka GAU):
@@ -189,7 +203,8 @@ python3 scripts/launch.py \
     --mode=train \
     --config.attn_type=full \
     --config.head_type=shga \
-    --config.sequence_len="$SEQ_LEN";
+    --config.reduction_type="$REDUCTION_TYPE" \
+    --config.sequence_len="$SEQ_LEN" 
 ```
 
 ### Quadratic-time attention, multi-query (MQA):
@@ -202,7 +217,8 @@ python3 scripts/launch.py \
     --mode=train \
     --config.attn_type=full \
     --config.head_type=mqa \
-    --config.sequence_len="$SEQ_LEN";
+    --config.reduction_type="$REDUCTION_TYPE" \
+    --config.sequence_len="$SEQ_LEN" 
 ```
 
 ### Quadratic-time attention, multi-head (MHA):
@@ -215,7 +231,8 @@ python3 scripts/launch.py \
     --mode=train \
     --config.attn_type=full \
     --config.head_type=mha \
-    --config.sequence_len="$SEQ_LEN";
+    --config.reduction_type="$REDUCTION_TYPE" \
+    --config.sequence_len="$SEQ_LEN" 
 ```
 
 ## FLOP/s estimation
@@ -223,4 +240,4 @@ python3 scripts/launch.py \
 [FLOP/s](https://en.wikipedia.org/wiki/FLOPS) can be estimated in our scripts using Jax's [AOT compilation](https://jax.readthedocs.io/en/latest/aot.html) functionality to produce the FLOP count first. 
 However, the estimate is not currently available on TPU, and on CPU Jax's calculation appears to be *incorrect*: the flop count is even less than product of the parameter count and the local batch size in tokens. 
 
-As a result, we discourage users from estimating the flop count using ```--config.mode=flop_count``` until this issue is resolved.
+As a result, we discourage users from estimating the flop count using ```--config.mode=flop_count``` until this issue is resolved. We have opened a github ticket [here](https://github.com/google/flax/issues/3492), so that users can track its resolution. 

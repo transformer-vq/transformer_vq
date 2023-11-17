@@ -32,11 +32,14 @@ MODES = ["train_vocab", "train", "validation", "test", "flop_count"]
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", None, "Configuration file", lock_config=False)
 flags.DEFINE_boolean("multihost", None, "Multihost?")
-flags.DEFINE_string("workdir", None, "Directory for experiment data.")
 flags.DEFINE_enum("mode", None, MODES, "Mode.")
+flags.DEFINE_string("workdir", None, "Directory for experiment data.")
 flags.DEFINE_boolean("wb_enabled", False, "Log to W&B?")
 flags.DEFINE_string("wb_run", None, "W&B run id, for resuming with continuity.")
 flags.DEFINE_string("model_name", None, "Optional model name. Generated if not given.")
+flags.DEFINE_string("gpu_coord_addr", None, "For non-slurm/openmpi GPU clusters.")
+flags.DEFINE_string("gpu_n_process", None, "For non-slurm/openmpi GPU clusters.")
+flags.DEFINE_string("gpu_process_id", None, "For non-slurm/openmpi GPU clusters.")
 flags.mark_flags_as_required(["config", "multihost", "workdir", "mode"])
 
 
@@ -430,8 +433,14 @@ def flop_count():
     rng_sync, rng_unsync = get_root_rngs()
     train_state = get_train_state(rng_sync)
     train_state = jax_utils.replicate(train_state)
-    train_state = jax.block_until_ready(train_state)
 
+    inputs = jax.random.randint(
+        key=jax.random.fold_in(rng_unsync, hash("inputs")),
+        minval=0,
+        maxval=256,
+        shape=[local_batch_size, sequence_len],
+        dtype=jnp.int32,
+    )
     targets = jax.random.randint(
         key=jax.random.fold_in(rng_unsync, hash("targets")),
         minval=0,
@@ -440,25 +449,35 @@ def flop_count():
         dtype=jnp.int32,
     )
     batch = dict(
-        inputs=jnp.pad(targets[:, :-1], ((0, 0), (1, 0))),
+        inputs=inputs,
         targets=targets,
-        loss_mask=jnp.full([local_batch_size, sequence_len], fill_value=True),
+        loss_mask=jnp.full([local_batch_size, sequence_len], fill_value=1),
     )
     batch = common_utils.shard(batch)
-    batch = jax.block_until_ready(batch)
 
     rng_batch = common_utils.shard_prng_key(rng_unsync)
-    rng_batch = jax.block_until_ready(rng_batch)
 
     compiled = train_step.lower(train_state, batch, rng_batch).compile()
     cost_analysis = compiled.cost_analysis()
+    logging.info("== Cost Analysis ==")
     if cost_analysis is None:
         logging.info("Cost analysis is not available from compiler on platform.")
     else:
-        n_flop = cost_analysis[0]["flops"]
-        logging.info(f"Flop count per device (is wrong, see readme): {n_flop}")
         logging.info(f"Num hosts: {jax.process_count()}")
         logging.info(f"Num devices per host: {jax.local_device_count()}")
+        n_flop = cost_analysis[0]["flops"]
+        logging.info(f"FLOP count estimate: {n_flop}")
+        n_param = sum(
+            x.size
+            for x in jax.tree_util.tree_leaves(jax_utils.unreplicate(train_state))
+        )
+        logging.info(f"Param count: {n_param}")
+        n_example_per_dev = (local_batch_size / jax.local_device_count()) * sequence_len
+        logging.info(f"Example count per host: {n_example_per_dev}")
+        n_min_flop_reasonable = n_example_per_dev * n_param
+        logging.info(f"Reasonable flop count min: {n_min_flop_reasonable}")
+        is_reasonable = n_flop >= n_min_flop_reasonable
+        logging.info(f"FLOP count estimate is reasonable: {is_reasonable}")
 
 
 def log_devices_and_config():
@@ -485,7 +504,14 @@ def main(argv):
     tf.get_logger().setLevel(logging.INFO)
     logging.set_verbosity(logging.INFO)
     if FLAGS.multihost:
-        jax.distributed.initialize()
+        if FLAGS.coordinator_addr is None:
+            jax.distributed.initialize()
+        else:
+            jax.distributed.initialize(
+                coordinator_address=FLAGS.gpu_coord_addr,
+                num_processes=FLAGS.gpu_n_process,
+                process_id=FLAGS.gpu_process_id,
+            )
     if jax.default_backend() in {"cuda", "rocm"}:
         # Hide any GPUs from TensorFlow. Otherwise TF might reserve memory and make
         # it unavailable to JAX. (Not necessary with TPU.)

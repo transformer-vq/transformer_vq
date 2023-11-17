@@ -24,7 +24,7 @@ jax.config.update("jax_enable_x64", True)
 ATTN_TYPES = ["vq", "full", "vq_old", "full_old"]  # the _old ones use a vanilla scan
 ATTN_TYPES_OLD_UNWRAPPED = ["vq_old_unwrapped", "full_old_unwrapped"]
 HEAD_TYPES = ["mha", "mqa", "shga"]
-REDUCTION_TYPES = ["cumsum", "matmul", "assoc_scan"]
+REDUCTION_TYPES = ["serial", "matmul", "assoc_scan", "sum"]  # sum is unstable
 WIDENINGS = [7]
 DTYPES = [jnp.float32]
 TOLERANCES = dict(atol=1e-5, rtol=1e-4)
