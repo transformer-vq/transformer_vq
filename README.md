@@ -2,7 +2,7 @@
 
 Optimized implementation of 'Transformer-VQ: Linear-Time Transformers via Vector Quantization'.
 
-Compared to the legacy implementation, this branch is optimized for *high throughput* and *fast compile times* rather than full flexibility. 
+Compared to the legacy branch, this branch is optimized for *high throughput* and *fast compile times* rather than full flexibility. 
 It does not yet support sampling, custom update lengths, or decoupling the k/v cache lengths from the block length. 
 
 Support for model parallelism using pjit will be added in the next few weeks!
@@ -11,13 +11,16 @@ Support for model parallelism using pjit will be added in the next few weeks!
 
 The scripts use [W&B](https://wandb.ai/) for cloud-based logging. It is free for personal and academic use.
 
-Clone the repo and install the dependencies; we recommend using [venv](https://docs.python.org/3/library/venv.html) or similar to avoid overwriting the system python dependencies.
+Clone the repo and install the dependencies. 
+When not using TPUs, we strongly recommend installing all dependencies in a [miniconda](https://docs.conda.io/projects/miniconda/en/latest/index.html) environment. 
 ```
 git clone https://github.com/transformer-vq/transformer_vq/;
 cd transformer_vq;
-##### CPU or GPU
-pip3 install -e '.[no_tpu]';
-##### TPU
+##### CPU
+pip3 install -e '.[cpu]';
+##### Nvidia GPU
+pip3 install -e '.[gpu]' -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html;
+##### TPU VM
 pip3 install -e '.[tpu]' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html;
 ```
 
@@ -150,8 +153,7 @@ export WORKDIR=workdir;
 export SEQ_LEN=2048;
 export REDUCTION_TYPE=serial;
 ```
-In our experiments, cross-block reduction type "serial" is the most efficient for both short and long sequences, and it was also the only stable reduction type with linear complexity! 
-
+In our experiments with TPU v3 and V100 GPUs, cross-block reduction type "serial" was the most efficient. For later-generation TPUs/GPUs, ```REDUCTION_TYPE=matmul``` may be faster for the range of sequence lengths tested, though it technically incurs a tiny quadratic complexity. 
 
 ### VQ Attention, single-head gated (SHGA, aka GAU):
 ```

@@ -22,8 +22,8 @@ setup(
         "ml_collections",
         "chex>=0.1.7",
         "datasets>=2.11.0",
-        "jaxlib==0.4.9",
         "flax==0.6.11",
+        "ml-dtypes==0.2.0",
         "numpy>=1.22.0",
         "optax==0.1.5",
         "orbax-checkpoint==0.1.7",
@@ -44,10 +44,17 @@ setup(
             "pytest",
             "pytest-cov",
         ],
-        "no_tpu": [
+        "cpu": [
+            "jaxlib==0.4.9",
             "jax==0.4.9",
         ],
+        "gpu": [
+            "jaxlib==0.4.9+cuda11.cudnn86",
+            "jax[cuda11_pip]==0.4.9",
+            "protobuf<=3.20.1",
+        ],
         "tpu": [
+            "jaxlib==0.4.9",
             "jax[tpu]==0.4.9",
             "protobuf<=3.20.1",
         ],

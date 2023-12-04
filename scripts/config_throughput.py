@@ -15,7 +15,7 @@ def get_config():
     config.dtype = jnp.bfloat16  # activation dtype
     config.attn_type = "vq"  # one of vq, full, vq_old, full_old
     config.head_type = "shga"  # one of shga, mqa, mha
-    config.reduction_type = "matmul"  # for vq attn; one of cumsum, matmul, assoc_scan
+    config.reduction_type = "serial"  # for vq attn; one of serial, matmul, assoc_scan
     config.d_model = 768  # model width
     config.d_k = 128  # key width
     config.n_code = 512  # number of codes per codebook
@@ -38,7 +38,7 @@ def get_config():
     config.wd_lam = 0.0  # decoupled weight decay coefficient
     config.n_warmup_step = 10  # steps of linear warmup
     config.n_max_step = 20  # steps of training total
-    config.n_print_step = 1  # steps of training per print
+    config.n_print_step = 5  # steps of training per print
     config.n_save_step = 100  # steps of training per save
     config.n_eval_step = 10  # steps of evaluation per save
     config.n_save_keep = 5  # num checkpoints (save improvements, delete oldest)

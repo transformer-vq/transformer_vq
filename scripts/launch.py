@@ -126,7 +126,7 @@ def get_optimizer() -> optax.GradientTransformation:
             b1=0.9,
             b2=0.98,
             eps=10**-9,
-            mu_dtype=jnp.float32,  # full precision as suggested by Rae et al., 2021
+            mu_dtype=FLAGS.config.param_dtype,  # Rae et al., 2021
             weight_decay=0.0,  # optimizers in optax scale wd by lr, so diy
         )
     if FLAGS.config.optimizer == "lion":
@@ -134,7 +134,7 @@ def get_optimizer() -> optax.GradientTransformation:
             learning_rate=FLAGS.config.lr_max,
             b1=0.95,
             b2=0.98,
-            mu_dtype=jnp.bfloat16,  # bfloat16 as suggested by Chen et al., 2023
+            mu_dtype=FLAGS.config.dtype,  # Chen et al., 2023
             weight_decay=0.0,  # optimizers in optax scale wd by lr, so diy
         )
     if FLAGS.config.optimizer == "adafactor":
