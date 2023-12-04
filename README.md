@@ -1,11 +1,29 @@
 # Transformer-VQ
 
-Optimized implementation of 'Transformer-VQ: Linear-Time Transformers via Vector Quantization'.
+Tensor-parallel implementation of 'Transformer-VQ: Linear-Time Transformers via Vector Quantization'.
 
-Compared to the legacy branch, this branch is optimized for *high throughput* and *fast compile times* rather than full flexibility. 
-It does not yet support sampling, custom update lengths, or decoupling the k/v cache lengths from the block length. 
+This branch is intended for training very large models on accelerator clusters.   
+In addition, the model initialization and checkpointing occur in a distributed fashion.
 
-Support for model parallelism using pjit will be added in the next few weeks!
+### Environments tested on so far:
+- CPU with 32 cores
+- TPU v3 with 8 cores
+- TPU v3 with 32 cores
+- TPU v3 with 128 cores
+
+### The current limitations:
+- Global batch size >= num devices.
+- Update length == sequence length.
+- No dropout. 
+- No sampling. 
+
+### Implementation differences from the original paper:
+- Weight decay is multiplied by peak learning rate and schedule factor.
+- Weight decay is applied to all non-codebook parameters. 
+- No biases in linear layers. 
+- No gain or bias in RMSNorm.
+- SHGA is the only supported head type (no MHA/MQA).
+- Serial is the only supported cross-block reduction type.
 
 ## Single-Host Launch (CPU, GPU, and TPU)
 
@@ -30,6 +48,8 @@ export WANDB_API_KEY=WB_KEY;  # if logging to W&B
 python3 ./scripts/launch.py \
     --config=CONFIG_FILE \
     --multihost=MULTIHOST \
+    --n_data_shard=N_DATA_SHARD \
+    --n_model_shard=N_MODEL_SHARD \
     --workdir=WORKDIR \
     --mode=MODE \
     [--wb_enabled=WB_ENABLED] \
@@ -38,25 +58,19 @@ python3 ./scripts/launch.py \
 where
 - ```CONFIG_FILE``` is a path to a configuration file,
 - ```MULTIHOST``` is ```False``` single-host experiments,
+- ```N_DATA_SHARD``` is the number of ways to shard the data.
+- ```N_MODEL_SHARD``` is the number of ways to shard the model. 
 - ```WORKDIR``` is a path to a local or cloud directory for experiment data. 
 - ```MODE``` is one of ```train_vocab```, ```train```, ```validation```, or ```test```. 
 - ```WB_ENABLED``` is optional and allows logging to W&B if ```True```. 
 - ```WB_RUN``` is optional, and allows resuming logging of an existing W&B run. 
 
 Settings in the specified configuration file can be overridden by appending a new setting.
-For example, to change the batch size: 
-```
-python3 ./scripts/launch.py \
-    --config=CONFIG_FILE \
-    --multihost=MULTIHOST \
-    --workdir=WORKDIR \
-    --mode=MODE \
-    --config.global_batch_size=8 \
-```
+For example, to change the batch size, append ```--config.global_batch_size=8```.
 
 ## Multi-Host Launch on GPU Clusters
 
-For GPU clusters using Slurm or OpenMPI, our scripts work without additional configuration. 
+For GPU clusters using Slurm or OpenMPI, our scripts should work without additional configuration. 
 For other GPU clusters, you need to provide values for the coordinator IP and port, the number of processes, and a process ID for each process starting from 0.  
 For example:
 ```
@@ -142,104 +156,3 @@ You can delete the pod/slice instance as follows:
 ```
 gcloud compute tpus tpu-vm delete TPU_POD_SLICE_NAME --zone ZONE
 ```
-
-## Training speed tests
-
-Commands to speed test are as follows. 
-For convenience, set some environment variables ```WORKDIR```, ```SEQ_LEN```, and ```REDUCTION_TYPE``` before running.
-For example:
-```
-export WORKDIR=workdir;
-export SEQ_LEN=2048;
-export REDUCTION_TYPE=serial;
-```
-In our experiments with TPU v3 and V100 GPUs, cross-block reduction type "serial" was the most efficient. For later-generation TPUs/GPUs, ```REDUCTION_TYPE=matmul``` may be faster for the range of sequence lengths tested, though it technically incurs a tiny quadratic complexity. 
-
-### VQ Attention, single-head gated (SHGA, aka GAU):
-```
-python3 scripts/launch.py \
-    --config=scripts/config_throughput.py \
-    --workdir="$WORKDIR" \
-    --multihost=False \
-    --mode=train \
-    --config.attn_type=vq \
-    --config.head_type=shga \
-    --config.reduction_type="$REDUCTION_TYPE" \
-    --config.sequence_len="$SEQ_LEN" 
-```
-
-### VQ Attention, multi-query (MQA):
-
-```
-python3 scripts/launch.py \
-    --config=scripts/config_throughput.py \
-    --workdir="$WORKDIR" \
-    --multihost=False \
-    --mode=train \
-    --config.attn_type=vq \
-    --config.head_type=mqa \
-    --config.reduction_type="$REDUCTION_TYPE" \
-    --config.sequence_len="$SEQ_LEN" 
-```
-
-### VQ Attention, multi-head (MHA):
-
-```
-python3 scripts/launch.py \
-    --config=scripts/config_throughput.py \
-    --workdir="$WORKDIR" \
-    --multihost=False \
-    --mode=train \
-    --config.attn_type=vq \
-    --config.head_type=mha \
-    --config.reduction_type="$REDUCTION_TYPE" \
-    --config.sequence_len="$SEQ_LEN" 
-```
-
-### Quadratic-time attention, single-head gated (SHGA, aka GAU):
-```
-python3 scripts/launch.py \
-    --config=scripts/config_throughput.py \
-    --workdir="$WORKDIR" \
-    --multihost=False \
-    --mode=train \
-    --config.attn_type=full \
-    --config.head_type=shga \
-    --config.reduction_type="$REDUCTION_TYPE" \
-    --config.sequence_len="$SEQ_LEN" 
-```
-
-### Quadratic-time attention, multi-query (MQA):
-
-```
-python3 scripts/launch.py \
-    --config=scripts/config_throughput.py \
-    --workdir="$WORKDIR" \
-    --multihost=False \
-    --mode=train \
-    --config.attn_type=full \
-    --config.head_type=mqa \
-    --config.reduction_type="$REDUCTION_TYPE" \
-    --config.sequence_len="$SEQ_LEN" 
-```
-
-### Quadratic-time attention, multi-head (MHA):
-
-```
-python3 scripts/launch.py \
-    --config=scripts/config_throughput.py \
-    --workdir="$WORKDIR" \
-    --multihost=False \
-    --mode=train \
-    --config.attn_type=full \
-    --config.head_type=mha \
-    --config.reduction_type="$REDUCTION_TYPE" \
-    --config.sequence_len="$SEQ_LEN" 
-```
-
-## FLOP/s estimation
-
-[FLOP/s](https://en.wikipedia.org/wiki/FLOPS) can be estimated in our scripts using Jax's [AOT compilation](https://jax.readthedocs.io/en/latest/aot.html) functionality to produce the FLOP count first. 
-However, the estimate is not currently available on TPU, and on CPU Jax's calculation appears to be *incorrect*: the flop count is even less than product of the parameter count and the local batch size in tokens. 
-
-As a result, we discourage users from estimating the flop count using ```--config.mode=flop_count``` until this issue is resolved. We have opened a github ticket [here](https://github.com/google/flax/issues/3492), so that users can track its resolution. 

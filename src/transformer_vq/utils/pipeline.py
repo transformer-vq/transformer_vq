@@ -6,6 +6,8 @@ import numpy as np
 import seqio
 import tensorflow as tf
 
+from transformer_vq.nn.sharding import get_namedsharding
+
 
 def pack_examples(ds, sequence_len, vocab, append_eos, is_train):
     # pack documents into sequences of specified length. for image datasets,
@@ -102,3 +104,18 @@ def get_batches(
         ds = pad_batches(ds, batch_size=batch_size, **common)
     ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
     return ds.as_numpy_iterator()
+
+
+def to_global_array(array, global_mesh):
+    assert array.ndim == 2
+    assert global_mesh.axis_names == ("data", "model")
+    # first temporarily put the arrays on each local device, they may get moved later
+    arrays = jax.device_put(
+        np.split(array, len(global_mesh.local_devices), axis=0),
+        global_mesh.local_devices,
+    )
+    # now use jax.make_array_from_single_device_arrays
+    global_shape = (jax.process_count() * array.shape[0], array.shape[1])
+    sharding = get_namedsharding(global_mesh, (global_mesh.axis_names,))
+    arr = jax.make_array_from_single_device_arrays(global_shape, sharding, arrays)
+    return arr

@@ -6,7 +6,7 @@ from setuptools import setup
 
 setup(
     name="transformer_vq",
-    version="15.0.0",
+    version="16.0.0",
     url="https://github.com/transformer-vq/transformer_vq/",
     license="MIT",
     author="Anonymous Authors; Paper and Code Under Double-Blind Review at ICLR 2024",
@@ -26,7 +26,7 @@ setup(
         "ml-dtypes==0.2.0",
         "numpy>=1.22.0",
         "optax==0.1.5",
-        "orbax-checkpoint==0.1.7",
+        "orbax-checkpoint==0.2.3",
         "requests>=2.28.1",
         "sentencepiece==0.1.96",
         "seqio==0.0.16",
@@ -45,17 +45,17 @@ setup(
             "pytest-cov",
         ],
         "cpu": [
-            "jaxlib==0.4.9",
-            "jax==0.4.9",
+            "jaxlib==0.4.13",
+            "jax==0.4.13",
         ],
         "gpu": [
-            "jaxlib==0.4.9+cuda11.cudnn86",
-            "jax[cuda11_pip]==0.4.9",
+            "jaxlib==0.4.13+cuda11.cudnn86",
+            "jax[cuda11_pip]==0.4.13",
             "protobuf<=3.20.1",
         ],
         "tpu": [
-            "jaxlib==0.4.9",
-            "jax[tpu]==0.4.9",
+            "jaxlib==0.4.13",
+            "jax[tpu]==0.4.13",
             "protobuf<=3.20.1",
         ],
         "viz": [

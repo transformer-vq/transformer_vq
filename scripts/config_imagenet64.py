@@ -22,9 +22,6 @@ def get_config():
     config.n_layer = 24  # number of transformer layers (each is GAU+GAU or Attn+MLP)
     config.pe_abs = False  # include absolute positional embeddings?
     config.pe_lam = 100_000  # max angular wavelen for pos embs (similar to rope base)
-    config.p_dropsin = 0.1  # dropout rate on rel position embs for xl biases
-    config.p_dropres = 0.0  # dropout rate on residual connections
-    config.p_droplyr = 0.0  # dropout rate for layerdrop
     config.c_beta = 0.0001  # vq commit loss coefficient
     config.c_gamma = 0.99  # vq codebook ema rate
     config.e_tie = True  # tie input/output embs?

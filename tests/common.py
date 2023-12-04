@@ -15,16 +15,15 @@ import seqio
 import tensorflow as tf
 
 from transformer_vq.nn.types import TransformerConfig
-from transformer_vq.nn.attn2 import get_attn_cls
+from transformer_vq.nn.attn import get_attn_cls
 from transformer_vq.nn.model import Transformer
 
 jax.config.update("jax_enable_x64", True)
 
 
-ATTN_TYPES = ["vq", "full", "vq_old", "full_old"]  # the _old ones use a vanilla scan
-ATTN_TYPES_OLD_UNWRAPPED = ["vq_old_unwrapped", "full_old_unwrapped"]
-HEAD_TYPES = ["mha", "mqa", "shga"]
-REDUCTION_TYPES = ["serial", "matmul", "assoc_scan", "sum"]  # sum is unstable
+ATTN_TYPES = ["vq", "full"]
+HEAD_TYPES = ["shga"]
+REDUCTION_TYPES = ["serial"]
 WIDENINGS = [7]
 DTYPES = [jnp.float32]
 TOLERANCES = dict(atol=1e-5, rtol=1e-4)
@@ -90,7 +89,8 @@ def transformer_config_fixture():
         reduction_type="matmul",
     ):
         return TransformerConfig.create(
-            n_device=N_LOCAL_DEVICE,
+            n_model_shard=1,
+            n_data_shard=1,
             param_dtype=dtypes,
             dtype=dtypes,
             global_batch_size=global_batch_size,
